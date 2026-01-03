@@ -1,0 +1,12 @@
+[package]
+name = "DiskScrutiny"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+copypasta = "0.10.2"
+glium = { version = "0.34.0", default-features = true }
+imgui = { path = "imgui", features = ["docking"] }
+imgui-glium-renderer = { path = "imgui-glium-renderer"}
+imgui-winit-support = { path = "imgui-winit-support" }
+walkdir = "2.5.0"

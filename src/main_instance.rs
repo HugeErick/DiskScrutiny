@@ -1,7 +1,9 @@
-use crate::support;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use walkdir::WalkDir;
+
+use crate::support;
+use crate::utils::os_identity::TargetOS;
 
 struct ScanResult {
   path: String,
@@ -54,6 +56,18 @@ pub fn initialice_main_ui() {
 }
 
 fn perform_scan(root: &Path) -> Vec<ScanResult> {
+  let os = crate::utils::os_identity::identification();
+
+  match os {
+    TargetOS::Windows => {
+      scan_mft(root).unwrap_or_else(|_| scan_walkdir(root))
+    }
+
+    _ => scan_walkdir(root),
+  }
+}
+
+fn scan_walkdir(root: &Path) -> Vec<ScanResult> {
   let mut dir_sizes: HashMap<PathBuf, u64> = HashMap::new();
 
   for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
@@ -79,4 +93,9 @@ fn perform_scan(root: &Path) -> Vec<ScanResult> {
       size_mb: *size as f64 / 1_000_000.0,
     })
     .collect()
+}
+
+fn scan_mft(root: &Path) -> Result<Vec<ScanResult>, Box<dyn std::error::Error>> {
+  todo!("Implement MFT parsing logic using the 'ntfs' crate")
+
 }

@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use ntfs::NtfsAttributeType;
 use rfd::FileDialog;
 use std::collections::HashMap;
 use walkdir::WalkDir;
@@ -7,10 +8,6 @@ use walkdir::WalkDir;
 use std::fs::File;
 #[cfg(windows)]
 use ntfs::Ntfs;
-
-// This must be gated or removed to compile on Linux
-#[cfg(windows)]
-use std::os::windows::fs::FileExt;
 
 use crate::support;
 use crate::utils::os_identity::TargetOS;
@@ -35,11 +32,11 @@ pub fn initialice_main_ui() {
         ui.text("Enter path to scan");
         ui.same_line();
 
-        if ui.button("Choose folder")
-        && let Some(path) = FileDialog::new().pick_folder() {
-          results = perform_scan(&path);
-          selected_path = Some(path);
-
+        if ui.button("Choose folder") {
+          if let Some(path) = FileDialog::new().pick_folder() {
+            results = perform_scan(&path);
+            selected_path = Some(path);
+          }
         }
         ui.separator();
 
@@ -96,7 +93,7 @@ fn scan_walkdir(root: &Path) -> Vec<ScanResult> {
       path: path.to_string_lossy().into_owned(),
       size_mb: *size as f64 / 1_000_000.0,
     })
-    .collect()
+  .collect()
 }
 
 fn scan_mft(root: &Path) -> Result<Vec<ScanResult>, Box<dyn std::error::Error>> {
@@ -108,6 +105,8 @@ fn scan_mft(root: &Path) -> Result<Vec<ScanResult>, Box<dyn std::error::Error>> 
 
   #[cfg(windows)]
   {
+    use ntfs::NtfsFileFlags;
+
     let drive_str = root.to_str().ok_or("invalid path")?;
     if drive_str.len() < 2 { return Err("Invalid drive".into()); }
     let disk_name = format!("\\\\.\\{}", &drive_str[0..2]); 
@@ -115,22 +114,44 @@ fn scan_mft(root: &Path) -> Result<Vec<ScanResult>, Box<dyn std::error::Error>> 
     let mut disk = File::open(disk_name)?;
     let ntfs = Ntfs::new(&mut disk)?;
 
+    let mft_file = ntfs.file(&mut disk, 0)?;
+    let mut mft_entry_count = 0u64;
+
+    let mut mft_attrs = mft_file.attributes();
+    while let Some(Ok(attr_item)) = mft_attrs.next(&mut disk) {
+      let attr = attr_item.to_attribute()?;
+      if attr.ty()? == NtfsAttributeType::Data {
+        mft_entry_count = attr.value_length() / (ntfs.file_record_size() as u64);
+        break;
+      }
+    }
+
     let mut dir_sizes: HashMap<u64, u64> = HashMap::new();
     let mut id_to_name: HashMap<u64, String> = HashMap::new();
 
-    for entry in ntfs.all_files(&mut disk) {
-      let Ok(file) = entry else { continue };
-      let file_id = file.file_record_number();
+    for record_num in 0..mft_entry_count {
+      let Ok(file) = ntfs.file(&mut disk, record_num) else { continue };
 
-      if let Some(Ok(name)) = file.name(&mut disk) {
-        id_to_name.insert(file_id, name.name().to_string());
+      // Check if file is in use using the contains method from bitflags
+      let flags = file.flags();
+      if !flags.contains(NtfsFileFlags::IN_USE) {
+        continue;
       }
 
-      if let Some(Ok(data)) = file.data_attribute(&mut disk) {
-        let size = data.value_length();
-        if let Some(parent_ref) = file.parent_directory_reference() {
-          let parent_id = parent_ref.file_record_number();
-          *dir_sizes.entry(parent_id).or_insert(0) += size;
+      if let Some(Ok(name_res)) = file.name(&mut disk, None, None) {
+        let name_str = name_res.name().to_string().unwrap_or_default();
+        id_to_name.insert(record_num, name_str);
+
+        let parent_id = name_res.parent_directory_reference().file_record_number();
+
+        let mut file_attrs = file.attributes();
+        while let Some(Ok(attr_item)) = file_attrs.next(&mut disk) {
+          let attr = attr_item.to_attribute()?;
+          if attr.ty()? == NtfsAttributeType::Data {
+            let size = attr.value_length();
+            *dir_sizes.entry(parent_id).or_insert(0) += size;
+            break; 
+          }
         }
       }
     }
@@ -139,15 +160,15 @@ fn scan_mft(root: &Path) -> Result<Vec<ScanResult>, Box<dyn std::error::Error>> 
       .into_iter()
       .map(|(id, size)| {
         let name = id_to_name.get(&id)
-          .map(|s| s.to_string())
-          .unwrap_or_else(|| format!("directory id {}", id));
+          .cloned()
+          .unwrap_or_else(|| format!("dir_{}", id));
 
         ScanResult {
           path: name,
-          size_mb: size as f64 / 1_000_000.0,
+          size_mb: size as f64 / 1_048_576.0,
         }
       })
-      .collect();
+    .collect();
 
     results.sort_by(|a, b| b.size_mb.partial_cmp(&a.size_mb).unwrap_or(std::cmp::Ordering::Equal));
     Ok(results.into_iter().take(10).collect())
